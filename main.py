@@ -2,10 +2,11 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.wait import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import StaleElementReferenceException
+from selenium.common.exceptions import StaleElementReferenceException, TimeoutException
 import re
+import time
 
-driver = webdriver.Firefox()
+driver = webdriver.Chrome()
 driver.get("https://orteil.dashnet.org/cookieclicker/")
 
 buildings_cps = {}
@@ -20,10 +21,17 @@ driver.find_element(By.XPATH, "/html/body/div[2]/div[2]/div[2]/div[2]/div[2]/but
 # Select English as the language
 driver.find_element(By.ID, "langSelect-EN").click()
 
-# Wait for cookie to be clickable
-WebDriverWait(driver, 10).until(
-    EC.element_to_be_clickable((By.ID, "bigCookie"))
-)
+# Wait for the page to load completely
+time.sleep(3)  # Add a short delay to ensure the page is fully loaded
+
+try:
+    WebDriverWait(driver, 10).until(
+        EC.element_to_be_clickable((By.ID, "bigCookie"))
+    )
+except Exception as e:
+    print(f"Error: Unable to locate or interact with 'bigCookie'. Details: {e}")
+    driver.quit()
+    exit(1)  # Exit the script if the element cannot be found
 
 button = driver.find_element(By.XPATH, "/html/body/div[1]/div/a[1]")
 driver.execute_script("arguments[0].click();", button)
@@ -48,23 +56,35 @@ def current_cps():
         return current_cps()
 
 def click_cookie(clicks = 10):
+    time.sleep(0.1)
     # Click the cookie a specified number of times
     print(f"Clicking cookie {clicks} times...")
     for _ in range(clicks):
         bigCookie.click()
 
 def get_available_upgrades():
-    # Get the available upgrades
+    # Get first available upgrade
     print("Getting available upgrades...")
-    upgrades_container = driver.find_element(By.ID, "upgrades")
-    upgrades = upgrades_container.find_elements(By.CSS_SELECTOR, ".crate.upgrade.enabled")
-    return upgrades
+    try:
+        # Use JavaScript to check for enabled upgrades
+        has_upgrades = driver.execute_script("return document.querySelectorAll('.crate.upgrade.enabled').length > 0")
+        
+        if has_upgrades:
+            # Only now try to get the element with Selenium
+            upgrade = driver.find_element(By.CSS_SELECTOR, ".crate.upgrade.enabled")
+            print("Found available upgrade")
+            return upgrade
+        else:
+            print("No available upgrades found")
+            return None
+    except Exception as e:
+        print(f"Error finding upgrades: {e}")
+        return None
 
 def get_available_buildings():
     # Get the available buildings
     print("Getting available buildings...")
-    buildings_container = driver.find_element(By.ID, "products")
-    buildings = buildings_container.find_elements(By.CSS_SELECTOR, ".product.unlocked.enabled")
+    buildings = driver.find_elements(By.CSS_SELECTOR, ".product.unlocked.enabled")
     return buildings
 
 def buy_upgrade(upgrade):
@@ -72,34 +92,75 @@ def buy_upgrade(upgrade):
 
 def buy_building(building):
     try:
+        building_name = building.find_element(By.CLASS_NAME, "title").text
+
         previous_cps = current_cps()
         building.click()
+        time.sleep(0.5)
         new_cps = current_cps()
-        buildings_cps[building] = new_cps - previous_cps
+
+        cps_difference = new_cps - previous_cps
+    
+        if building_name not in buildings_cps or cps_difference > 0:
+            buildings_cps[building_name] = cps_difference
+            print(f"Updated CPS for {building_name}: +{cps_difference:.2f}")
+    
     except StaleElementReferenceException:
         print("StaleElementReferenceException encountered in buy_building. Retrying...")
         buildings = get_available_buildings()
         if building in buildings:
             buy_building(building)
 
-def best_purchase(upgrades, buildings):
-    # Determine the best purchase option
-    best_purchase = (None, -1)
-    if upgrades:
-        return upgrades[0]  # Buy the first available upgrade
-
+def best_purchase(upgrade, buildings):
+    """Determine the best purchase option based on ROI (Return on Investment)."""
+    
+    # Always prioritize upgrades as they typically provide significant multipliers
+    if upgrade:
+        print("Prioritizing available upgrade!")
+        return upgrade
+    
+    # Track the best building to buy
+    best_option = None
+    best_roi = -1
+    
     for building in buildings:
-        # Unlock new available buildings
-        if building not in buildings_cps:
+        # Get building name for better logging
+        try:
+            building_name = building.find_element(By.CLASS_NAME, "title").text
+        except:
+            building_name = "Unknown Building"
+            
+        # Unlock new building types as a priority to expand options
+        if building_name not in buildings_cps:
             return building
             
-        price = int(building.find_element(By.CLASS_NAME, "price").text.replace(",", ""))
-        cps = buildings_cps.get(building, 0)  # Use 0 if building is not in the dictionary
-        cps_per_price = cps / price if price > 0 else 0
-        if cps_per_price > best_purchase[1]:
-            best_purchase = (building, cps_per_price)
-
-    return best_purchase[0]
+        # Calculate ROI (Return on Investment)
+        try:
+            price = int(building.find_element(By.CLASS_NAME, "price").text.replace(",", ""))
+            cps = buildings_cps[building_name] if building_name in buildings_cps else 0
+            
+            # Calculate payback period (seconds to recoup investment)
+            payback_period = price / cps if cps > 0 else float('inf')
+            
+            # ROI is inverse of payback period - higher is better
+            roi = 1 / payback_period if payback_period > 0 else 0
+            
+            if roi > best_roi:
+                best_roi = roi
+                best_option = building
+        except Exception as e:
+            print(f"Error calculating ROI for {building_name}: {e}")
+    
+    if best_option:
+        try:
+            best_name = best_option.find_element(By.CLASS_NAME, "title").text
+            print(f"Best purchase: {best_name} with ROI: {best_roi:.6f}")
+        except:
+            print(f"Selected best building with ROI: {best_roi:.6f}")
+    else:
+        print("No viable buildings to purchase")
+        
+    return best_option
         
 def quit():
     # Close the browser
@@ -112,18 +173,16 @@ def main():
     try:
         while True:
             # Click the cookie a few times
-            click_cookie(50)
+            click_cookie(150)
 
             # Get available upgrades and buildings
-            upgrades = get_available_upgrades()
-            print(f"Available upgrades: {len(upgrades)}")
+            upgrade = get_available_upgrades()
             buildings = get_available_buildings()
             print(f"Available buildings: {len(buildings)}")
 
             # Determine the best purchase
-            best_item = best_purchase(upgrades, buildings)
-            print(f"Best item to buy: {best_item}")
-
+            best_item = best_purchase(upgrade, buildings)
+            print(buildings_cps)
             # Buy the best item if available
             if best_item:
                 if "upgrade" in best_item.get_attribute("class"):
@@ -135,7 +194,6 @@ def main():
 
     except KeyboardInterrupt:
         print("Exiting script...")
-        quit()
 
 if __name__ == "__main__":
     main()
